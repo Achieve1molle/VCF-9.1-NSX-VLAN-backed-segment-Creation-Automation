@@ -1,70 +1,56 @@
-# VCF-9.1-NSX-VLAN-backed-segment-Creation-Automation
+# VCF 9.1 NSX VLAN Segment Bulk Automation
 
+PowerShell 7 and WPF utility for bulk creating, updating, and deleting **VCF 9.1 NSX VLAN-backed Layer 2 segments** from CSV input.
 
-PowerShell 7 / WPF utility for bulk creation and deletion of **VCF 9.1 NSX VLAN-backed Layer 2 segments** from a CSV input file.
+**Current release:** v1.1.0  
+**Script:** `VCF91-NSX-VLAN-Segment-Bulk-Automation-v1.1.0.ps1`
 
-**Current documented release:** v1.0.7  
-**Script file name:** `VCF91-NSX-VLAN-Segment-Bulk-Automation-v1.0.7.ps1`
+## Overview
 
-This tool connects directly to NSX Manager, discovers VLAN transport zones and uplink teaming policies, validates a CSV, and performs create/delete actions against the NSX Policy API.
+The utility connects directly to NSX Manager, discovers VLAN transport zones and uplink teaming policies, validates CSV input, and applies each requested segment operation independently through the NSX Policy API.
 
----
+Version 1.1.0 adds idempotent create-or-update behavior. When a segment already exists, the utility compares its managed properties with the requested configuration. It updates the segment only when differences are found and records the changed fields in the run log and results CSV. A validation or API error affecting one row does not stop the remaining rows from being processed.
 
-## Purpose
-
-This tool provides an operator-friendly Windows UI for bulk managing NSX VLAN-backed segments in a VCF 9.1 environment.
-
-The script is intended for environments where an administrator needs to:
+## Key Capabilities
 
 - Bulk create VLAN-backed NSX segments.
-- Bulk delete VLAN-backed NSX segments.
-- Select the target VLAN transport zone from live NSX inventory.
-- Select an uplink teaming policy from live NSX inventory.
-- Keep a consistent run log and output folder per execution.
+- Update existing segments when managed properties differ.
+- Skip API writes when an existing segment already matches the requested state.
+- Bulk delete segments.
+- Continue processing after a single-row validation or API failure.
+- Select a VLAN transport zone from live NSX inventory.
+- Select an uplink teaming policy discovered from the selected transport zone.
+- Retry supported teaming-policy JSON field variants when required.
 - Preview and validate CSV input before execution.
-- Skip segment creation when the segment display name already exists.
+- Produce timestamped logs, request payloads, and a per-row results CSV.
 
-The tool creates **Layer 2 VLAN-backed segments** with:
+## Managed Segment Properties
 
-- No connected gateway.
-- No subnet.
-- A selected VLAN transport zone.
-- A selected VLAN ID from CSV.
-- Admin state controlled from CSV.
-- Optional uplink teaming policy override, with automatic retry without the policy override if NSX rejects the field/value.
+For rows with `State=1`, the utility creates a new segment or compares and manages these properties on an existing segment:
 
----
+- Display name
+- Description
+- Transport zone path
+- VLAN ID
+- Admin state
+- Uplink teaming policy
 
-## Supported Use Case
-
-Use this tool when you need repeatable bulk onboarding or cleanup of VLAN-backed NSX segments in VCF 9.1.
-
-Common scenarios include:
-
-- Migrating from vSphere Distributed Port Groups to NSX VLAN-backed segments.
-- Preparing VLAN-backed workload networks for VM migration.
-- Creating many VLAN segments consistently from a spreadsheet export.
-- Cleaning up old VLAN-backed segments by marking them for deletion in CSV.
-- Re-running the same CSV safely while skipping already-created segment names.
-
----
+Properties outside this list are not intentionally compared or managed by this release.
 
 ## Requirements
 
-- Windows automation host or jump host.
-- PowerShell 7 or later.
-- WPF-capable Windows session.
-- Network connectivity to NSX Manager over HTTPS/443.
-- NSX account with permissions to read inventory and create/delete segments.
-- CSV file with the required columns documented below.
+- Windows automation host or jump host
+- PowerShell 7 or later
+- Interactive Windows session with WPF support
+- Network connectivity to NSX Manager over HTTPS/443
+- NSX account with permission to read inventory and create, update, or delete segments
+- CSV file using the format described below
 
-The script uses PowerShell `Invoke-RestMethod` with `-SkipCertificateCheck` to support lab and self-signed NSX Manager certificates.
-
----
+VMware PowerCLI is detected for informational purposes but is not required. The script uses `Invoke-RestMethod` and `-SkipCertificateCheck` to support lab systems and NSX Managers using self-signed certificates.
 
 ## CSV Format
 
-The CSV must contain these columns:
+Required header:
 
 ```csv
 SegmentName,VLAN,Description,AdminState,State
@@ -78,234 +64,210 @@ VLAN1005,1005,VLAN 1005,1,1
 Old-VLAN1006,1006,Remove old segment,0,0
 ```
 
-### CSV Column Behavior
+### Column Reference
 
-| Column | Required | Description |
-|---|---:|---|
-| `SegmentName` | Yes | NSX segment display name. The script also converts this to a safe NSX segment ID. |
-| `VLAN` | Yes | VLAN ID from `0` through `4094`. |
-| `Description` | No | Segment description written to NSX during create. |
-| `AdminState` | Yes | `1` means `UP`; `0` means `DOWN`. |
-| `State` | Yes | `1` means create/skip-if-exists; `0` means delete. |
+| Column | Required | Accepted values | Behavior |
+|---|---:|---|---|
+| `SegmentName` | Yes | Non-empty name | Display name; also converted into a safe NSX segment ID for direct lookup. |
+| `VLAN` | Yes | Integer from `0` through `4094` | VLAN ID applied to a created or updated segment. |
+| `Description` | No | Text | Segment description. An empty value requests an empty description. |
+| `AdminState` | Yes | `1` or `0` | `1` maps to `UP`; `0` maps to `DOWN`. |
+| `State` | Yes | `1` or `0` | `1` means create or update; `0` means delete. |
 
----
+## Processing Flow
+
+```mermaid
+flowchart TD
+    A[Launch PowerShell 7 WPF utility] --> B[Create timestamped run folder and log]
+    B --> C[Connect to NSX Manager]
+    C --> D[Discover VLAN transport zones and teaming policies]
+    D --> E[Load CSV]
+    E --> F[Validate each CSV row independently]
+    F --> G{More rows?}
+    G -->|No| Z[Export results CSV and show summary]
+    G -->|Yes| H{Row valid?}
+    H -->|No| I[Record Failed validation result]
+    I --> G
+    H -->|Yes| J{Desired State}
+    J -->|Delete| K[DELETE segment]
+    K --> L{Delete result}
+    L -->|Deleted| M[Record Deleted]
+    L -->|Not found| N[Record NotFound]
+    L -->|Error| O[Record Failed and continue]
+    M --> G
+    N --> G
+    O --> G
+    J -->|Create or update| P[Look up existing segment by ID then display name]
+    P --> Q{Segment exists?}
+    Q -->|No| R[Build payload and PATCH new segment]
+    R --> S{PATCH successful?}
+    S -->|Yes| T[Record Created]
+    S -->|No| U[Try supported teaming field variant if applicable]
+    U --> V{Retry successful?}
+    V -->|Yes| T
+    V -->|No| O
+    T --> G
+    Q -->|Yes| W[Compare managed properties]
+    W --> X{Differences found?}
+    X -->|No| Y[Record NoChange]
+    Y --> G
+    X -->|Yes| AA[PATCH existing segment using its actual NSX path]
+    AA --> AB{PATCH successful?}
+    AB -->|Yes| AC[Record Updated and list changed fields]
+    AB -->|No| U
+    AC --> G
+```
 
 ## UI Workflow
 
-The UI is organized into these areas:
+1. Launch the script with PowerShell 7.
+2. Confirm the prerequisite status.
+3. Choose an output folder if the default is not appropriate.
+4. Enter the NSX Manager FQDN or IP address and credentials.
+5. Select **Connect**.
+6. Select a VLAN transport zone.
+7. Select an uplink teaming policy or the default option.
+8. Browse to and load the CSV.
+9. Select **Validate** to review row-level validation.
+10. Select **Execute**.
+11. Review the execution summary, log, payload files, and results CSV.
 
-- **Prerequisites**
-  - PowerShell version check.
-  - .NET/WPF check.
-  - CSV import availability.
-  - VMware PowerCLI informational status.
-- **Output**
-  - Output folder selector.
-  - Open output folder button.
-  - Current output path.
-- **NSX Manager Connection**
-  - NSX Manager FQDN/IP.
-  - Username.
-  - Password.
-  - Connect button.
-- **Inventory Selection**
-  - VLAN Traffic Type Transport Zone dropdown.
-  - Uplink Teaming Policy dropdown.
-- **CSV Input and Actions**
-  - Browse CSV.
-  - Load CSV.
-  - Sample CSV.
-  - Validate.
-  - Execute.
-- **CSV Preview / Validation** and **Log**
-  - Displayed side-by-side for easier vertical reading.
+## Create and Update Behavior
 
----
+For a valid row with `State=1`:
 
-## How the Script Works
+1. The script performs a direct lookup using the normalized segment ID.
+2. If that lookup does not return a segment, it searches the segment collection for a case-insensitive display-name match.
+3. For a new segment, it builds and sends a VLAN-backed segment payload using `PATCH`.
+4. For an existing segment, it uses the segment's actual NSX path and compares the managed properties.
+5. If differences exist, it sends an updated payload and logs the changed fields.
+6. If no differences exist, it records `NoChange` and does not send a `PATCH` request.
+7. When a non-default teaming policy is selected, the script can try both supported JSON field variants if the first request is rejected.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Admin as Admin / Operator
-    participant Host as Automation Host (PowerShell WPF)
-    participant CSV as CSV File
-    participant NSX as NSX Manager Policy API
-    participant Out as Run Output Folder
-
-    Admin->>Host: Launch script with PowerShell 7
-    Host->>Out: Create timestamped run folder and log
-    Host-->>Admin: Show WPF UI and prerequisite status
-
-    Admin->>Host: Enter NSX Manager credentials and click Connect
-    Host->>NSX: GET /policy/api/v1/infra
-    NSX-->>Host: Connection success
-    Host->>NSX: GET VLAN transport zones
-    NSX-->>Host: VLAN transport zone inventory
-    Host->>NSX: GET host-switch/uplink profiles
-    NSX-->>Host: Uplink teaming policy inventory
-    Host-->>Admin: Populate Transport Zone and Uplink Teaming Policy dropdowns
-
-    Admin->>Host: Browse and Load CSV
-    Host->>CSV: Import-Csv
-    CSV-->>Host: Segment rows
-    Host-->>Admin: Show rows in CSV Preview
-
-    Admin->>Host: Click Validate
-    loop For each CSV row
-        Host->>Host: Validate SegmentName, VLAN, AdminState, State
-        Host->>Host: Generate safe SegmentId
-    end
-    Host-->>Admin: Show validation results
-
-    Admin->>Host: Click Execute
-    Host->>Host: Re-validate CSV before API changes
-
-    loop For each valid CSV row
-        alt State = 0 delete
-            Host->>NSX: DELETE /policy/api/v1/infra/segments/{segmentId}
-            NSX-->>Host: Deleted or NotFound handled
-        else State = 1 create
-            Host->>NSX: GET /policy/api/v1/infra/segments
-            NSX-->>Host: Existing segment inventory
-            alt Segment display_name already exists
-                Host->>Out: Record SkippedExists result
-            else Segment does not exist
-                Host->>Out: Write payload_{segmentId}.json
-                Host->>NSX: PATCH /policy/api/v1/infra/segments/{segmentId} with VLAN segment payload
-                alt NSX accepts payload
-                    NSX-->>Host: Created/updated
-                else NSX rejects uplink teaming override
-                    NSX-->>Host: HTTP 400
-                    Host->>Out: Write payload_{segmentId}_retry_no_teaming.json
-                    Host->>NSX: PATCH /policy/api/v1/infra/segments/{segmentId} without teaming override
-                    NSX-->>Host: Created/updated on retry or failure
-                end
-            end
-        end
-    end
-
-    Host->>Out: Export SegmentResults_yyyyMMdd-HHmmss.csv
-    Host-->>Admin: Show execution result popup
-```
-
----
-
-## Create Behavior
-
-For rows where `State = 1`, the script performs the following logic:
-
-1. Looks up existing NSX segments by `display_name`.
-2. If a matching segment name is found, the script skips create/update.
-3. The result is written as `SkippedExists`.
-4. If no matching segment is found, the script builds a VLAN-backed segment payload.
-5. The payload is written to the run folder as `payload_<segmentId>.json`.
-6. The script attempts to create the segment with the selected uplink teaming policy.
-7. If NSX rejects the uplink teaming override, the script retries without the policy override.
-8. The retry payload is written as `payload_<segmentId>_retry_no_teaming.json`.
-
----
+> **Important:** An empty optional CSV value is treated as the requested value. For example, an empty `Description` can clear an existing description.
 
 ## Delete Behavior
 
-For rows where `State = 0`, the script performs:
+For a valid row with `State=0`, the script sends:
 
 ```text
 DELETE /policy/api/v1/infra/segments/{segmentId}
 ```
 
-If NSX reports that the segment does not exist, the script records the row as `NotFound` and treats this as a non-blocking outcome.
+A successful delete is recorded as `Deleted`. If NSX reports that the segment does not exist, the row is recorded as `NotFound` and processing continues.
 
----
+## Error Isolation and Continuation
+
+Execution is row-isolated:
+
+- Invalid rows are recorded as `Failed` with their validation message.
+- API failures are recorded as `Failed` with the returned error detail.
+- The script logs that processing will continue.
+- Remaining rows are processed normally.
+- The final dialog reports the number of failed rows and points to the results CSV.
+
+A setup-level failure, such as no NSX session or an invalid selected transport-zone path, can still prevent the run because no row can be processed safely.
 
 ## Output Files
 
-Each run creates a folder similar to:
+Each run creates a directory similar to:
 
 ```text
 NSXVlanSegments-Run-YYYYMMDD-HHMMSS
 ```
 
-Typical files include:
+Typical contents:
 
 ```text
 NSXVlanSegments-YYYYMMDD-HHMMSS.log
-payload_<segmentId>.json
-payload_<segmentId>_retry_no_teaming.json
+payload_<segmentId>_<teamingField>.json
+payload_<segmentId>_no_teaming.json
 SegmentResults_YYYYMMDD-HHMMSS.csv
 ```
 
----
+Payload files are generated for create or update attempts. A segment that produces `NoChange` does not require a payload file.
 
 ## Result Status Values
 
 | Result | Meaning |
 |---|---|
-| `CreatedOrUpdated` | Segment was created or updated successfully. |
-| `SkippedExists` | Segment display name already exists; create/update was skipped. |
-| `Deleted` | Segment delete completed successfully. |
-| `NotFound` | Delete target did not exist; treated as non-blocking. |
-| `Failed` | API call or validation action failed. Check the log and result CSV. |
+| `Created` | A new segment was created successfully. |
+| `Updated` | An existing segment was changed successfully. The message lists changed fields. |
+| `NoChange` | The existing segment already matched the requested managed properties. |
+| `Deleted` | The segment was deleted successfully. |
+| `NotFound` | A delete target did not exist; the desired absent state was already satisfied. |
+| `Failed` | Validation or an NSX API operation failed for that row; later rows continued. |
 
----
+## Logging Examples
 
-## Recommended Operational Flow
-
-1. Place the script on the Windows automation host.
-2. Launch with PowerShell 7.
-3. Select or confirm the output folder.
-4. Connect to NSX Manager.
-5. Select the VLAN transport zone.
-6. Select the uplink teaming policy.
-7. Browse and load the CSV.
-8. Click **Validate**.
-9. Review CSV Preview / Validation output.
-10. Click **Execute**.
-11. Review the result popup.
-12. Open the output folder and archive the log, payloads, and results CSV.
-13. Validate created NSX segments in the NSX Manager UI.
-
----
+```text
+[INFO] Updating segment 'VLAN1005' at '/policy/api/v1/infra/segments/vlan1005'. Changed fields: transport_zone_path, description.
+[INFO] Segment 'VLAN1005' updated successfully. Changed fields: transport_zone_path, description.
+[INFO] Segment 'VLAN1007' already matches the requested configuration. No change made.
+[ERROR] Segment 'VLAN1008' failed: NSX API call failed: PATCH ... Continuing with remaining rows.
+```
 
 ## Troubleshooting
 
 ### Execute is disabled
 
-Confirm:
+Confirm that:
 
-- NSX Manager is connected.
+- The NSX Manager connection succeeded.
 - A VLAN transport zone is selected.
-- A CSV has been loaded.
+- A CSV file has been loaded.
 
-### Segment create logs HTTP 400, then succeeds on retry
+### One row shows Failed but later rows succeeded
 
-This usually means NSX rejected the selected uplink teaming policy override field or value. The script retries without the override and records the primary failure in the result message.
+This is expected in v1.1.0. Review the row's `Message` in the results CSV and the corresponding log entry. Correct the input or NSX condition, then rerun the CSV. Rows already matching the requested state should return `NoChange`.
 
-### Segment shows `SkippedExists`
+### A segment unexpectedly shows Updated
 
-The script found an existing NSX segment with the same display name and skipped create/update as requested.
+Review the `Changed fields` list in the log and results CSV. Common causes include:
 
-### Delete returns `NotFound`
+- A different selected transport zone
+- A changed VLAN ID
+- Description whitespace or content differences
+- A different admin state
+- A different teaming-policy selection
 
-The requested segment ID was not present in NSX. The script treats this as non-blocking because the desired delete state is already satisfied.
+### Teaming-policy PATCH fails and retries
 
-### Transport zone dropdown is empty
+NSX versions or configurations may accept different advanced-config field names. The script tries the supported variants when a policy override is selected. If both attempts fail, that row is recorded as `Failed` and execution continues.
 
-Confirm the connected NSX Manager has VLAN-backed transport zones and that the account can read transport zone inventory.
+### Transport-zone dropdown is empty
 
----
+Verify that the connected NSX Manager contains VLAN-backed transport zones and that the account can read transport-zone inventory.
 
 ## Security Notes
 
-- Passwords are not saved to disk by the script.
-- The NSX password is held only in memory for the session.
-- The script uses Basic authentication to NSX Manager over HTTPS.
-- Self-signed certificates are supported through `-SkipCertificateCheck`.
-- Output payload files may contain segment names, VLAN IDs, transport zone paths, and descriptions.
+- Passwords are not written to disk.
+- The password is retained only in memory for the running session.
+- Basic authentication is sent over HTTPS.
+- Self-signed certificates are accepted through `-SkipCertificateCheck`.
+- Logs, payloads, and results may contain segment names, VLAN IDs, descriptions, transport-zone paths, and teaming-policy names.
+- Protect and retain output according to your organization's operational and security requirements.
 
----
+## Version History
 
-## Disclaimer
+### v1.1.0
 
-Validate this workflow in a controlled environment before production use. Ensure the selected transport zone, VLAN IDs, and uplink teaming policy selections match the target network design.
+- Added comparison-based updates for existing segments.
+- Added transport-zone, VLAN, description, admin-state, display-name, and teaming-policy change detection.
+- Added `Created`, `Updated`, and `NoChange` result distinctions.
+- Added changed-field reporting in logs and the results CSV.
+- Added row-level validation failure reporting during execution.
+- Ensured a failed row does not stop processing of later rows.
+- Updated execution warning text to describe update and continuation behavior.
 
+### v1.0.x
+
+- Initial WPF interface and NSX connectivity.
+- CSV validation and preview.
+- VLAN transport-zone and teaming-policy discovery.
+- Bulk create and delete operations.
+- Existing segments were skipped instead of updated.
+
+## Operational Guidance
+
+Test each new release in a controlled, nonproduction environment before production use. Verify that the selected transport zone, VLAN IDs, admin states, and teaming policies match the intended network design. Retain the prior script version and run outputs for rollback and audit purposes.
